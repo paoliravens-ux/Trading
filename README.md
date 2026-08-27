@@ -1,7 +1,8 @@
 # pricevol
 
-Pulls daily price history for a list of tickers with [yfinance](https://github.com/ranaroussi/yfinance),
-stores it in SQLite, and computes rolling **20-day realized volatility**.
+Pulls daily price history for a list of tickers, stores it in SQLite, and computes rolling
+**20-day realized volatility**. Three interchangeable data providers, so a blocked or
+rate-limited API is a flag change rather than a rewrite.
 
 ## Install
 
@@ -22,12 +23,33 @@ MSFT
 SPY
 ```
 
+## Data sources
+
+```bash
+pricevol sources          # what's available and whether a key is set
+```
+
+| `--source` | Key needed | Notes |
+| --- | --- | --- |
+| `yfinance` (default) | no | Yahoo Finance. Unofficial, rate limited, and blocked on some networks. |
+| `stooq` | no | stooq.com daily CSV. No signup. Split/dividend adjusted, so `adj_close` mirrors `close`. US symbols map to `aapl.us`; pass `bp.uk` or `^spx` verbatim. |
+| `alphavantage` | yes | Free key from [alphavantage.co](https://www.alphavantage.co/support/#api-key), exported as `$ALPHAVANTAGE_API_KEY`. Free tier is rate limited to a handful of calls a minute. |
+
+```bash
+pricevol run AAPL MSFT --source stooq
+PRICEVOL_SOURCE=stooq pricevol run          # or set it once
+```
+
+The provider is recorded per bar in `prices.source`, so you can see where each row came
+from after switching (`pricevol status` shows it). Adding another provider means writing a
+`(ticker, start, end) -> DataFrame` callable in `sources.py` and registering it in `SOURCES`.
+
 ## Use
 
 ```bash
 pricevol run                       # ingest + compute for tickers.txt
 pricevol run AAPL MSFT NVDA        # ...or for these symbols
-pricevol ingest AAPL --start 2020-01-01   # download only
+pricevol ingest AAPL --start 2020-01-01 --source stooq   # download only
 pricevol vol AAPL --window 20 --csv out/vol.csv
 pricevol latest                    # newest volatility per ticker
 pricevol status                    # what the database holds
@@ -65,7 +87,7 @@ are keyed by window, so 20- and 60-day series coexist in the same table.
 ## Schema
 
 ```sql
-prices(ticker, date, open, high, low, close, adj_close, volume,
+prices(ticker, date, open, high, low, close, adj_close, volume, source,
        PRIMARY KEY (ticker, date))
 
 realized_vol(ticker, date, window_days, realized_vol,   -- annualized
@@ -87,7 +109,8 @@ sqlite3 data/prices.sqlite \
 ```
 src/pricevol/
   config.py      defaults, ticker-list parsing
-  fetch.py       yfinance download + column normalization
+  sources.py     the providers (yfinance / stooq / alphavantage) + registry
+  fetch.py       provider dispatch, retries, column normalization
   db.py          SQLite schema, upserts, reads
   volatility.py  log returns and rolling realized volatility
   pipeline.py    ingest / compute / latest orchestration
@@ -101,7 +124,10 @@ tests/           pytest suite, no network required
 pytest
 ```
 
-The suite stubs the downloader and uses synthetic prices, so it runs offline. Only
-`pricevol ingest`/`run` touch the network; a sandbox that blocks `*.yahoo.com` will
-report `0 rows / empty response` rather than failing loudly, since yfinance returns an
-empty frame instead of raising.
+The suite stubs the HTTP layer and uses synthetic prices, so it runs offline; the Stooq
+and Alpha Vantage parsers are tested against captured response bodies.
+
+Only `pricevol ingest`/`run` touch the network. On a restricted network the `stooq` and
+`alphavantage` sources fail loudly with the reason (`Cannot reach stooq.com: ...`), while
+`yfinance` reports `0 rows / empty response` instead, because it swallows the error and
+returns an empty frame rather than raising.

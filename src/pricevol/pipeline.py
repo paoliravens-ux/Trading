@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
@@ -11,6 +12,7 @@ import pandas as pd
 from . import db as db_module
 from .config import DEFAULT_DB_PATH, DEFAULT_START, DEFAULT_WINDOW
 from .fetch import fetch_prices
+from .sources import DEFAULT_SOURCE
 from .volatility import realized_volatility_table
 
 
@@ -21,6 +23,7 @@ class IngestResult:
     first_date: Optional[str] = None
     last_date: Optional[str] = None
     error: Optional[str] = None
+    source: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -33,7 +36,8 @@ def ingest(
     start: Optional[str] = None,
     end: Optional[str] = None,
     full_refresh: bool = False,
-    fetcher: Callable[..., pd.DataFrame] = fetch_prices,
+    source: Optional[str] = None,
+    fetcher: Optional[Callable[..., pd.DataFrame]] = None,
 ) -> List[IngestResult]:
     """Download each ticker and store its bars.
 
@@ -41,7 +45,12 @@ def ingest(
     date is re-fetched so a partial last bar gets corrected). ``full_refresh``
     or an explicit ``start`` overrides that. A failure on one ticker is
     recorded and the rest still run.
+
+    ``source`` names a provider from :mod:`pricevol.sources`; ``fetcher`` can
+    override the download callable outright (used by the tests).
     """
+    source = source or DEFAULT_SOURCE
+    fetcher = fetcher or partial(fetch_prices, source=source)
     results: List[IngestResult] = []
     conn = db_module.connect(db_path)
     try:
@@ -54,15 +63,15 @@ def ingest(
             try:
                 frame = fetcher(ticker, start=ticker_start, end=end)
             except Exception as exc:  # noqa: BLE001 - report and continue
-                results.append(IngestResult(ticker, 0, error=str(exc)))
+                results.append(IngestResult(ticker, 0, error=str(exc), source=source))
                 continue
 
-            rows = db_module.upsert_prices(conn, ticker, frame)
+            rows = db_module.upsert_prices(conn, ticker, frame, source=source)
             first = last = None
             if rows:
                 first = frame.index.min().strftime("%Y-%m-%d")
                 last = frame.index.max().strftime("%Y-%m-%d")
-            results.append(IngestResult(ticker, rows, first, last))
+            results.append(IngestResult(ticker, rows, first, last, source=source))
     finally:
         conn.close()
     return results

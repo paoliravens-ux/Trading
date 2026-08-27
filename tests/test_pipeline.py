@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -116,3 +115,24 @@ def test_cli_init_creates_schema(tmp_path, capsys):
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
     assert {"prices", "realized_vol"} <= tables
+
+
+def test_ingest_records_the_source(tmp_path, fake_fetcher):
+    db = tmp_path / "p.sqlite"
+    results = pipeline.ingest(["AAPL"], db_path=db, source="stooq", fetcher=fake_fetcher)
+    assert results[0].source == "stooq"
+
+    conn = db_module.connect(db)
+    assert set(db_module.read_prices(conn, ["AAPL"])["source"]) == {"stooq"}
+    conn.close()
+
+
+def test_ingest_defaults_to_the_configured_source(tmp_path, fake_fetcher):
+    results = pipeline.ingest(["AAPL"], db_path=tmp_path / "p.sqlite", fetcher=fake_fetcher)
+    assert results[0].source == "yfinance"
+
+
+def test_cli_sources_lists_providers(capsys):
+    assert main(["sources"]) == 0
+    out = capsys.readouterr().out
+    assert "stooq" in out and "alphavantage" in out and "yfinance" in out

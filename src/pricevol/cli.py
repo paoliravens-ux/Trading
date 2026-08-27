@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -12,6 +13,7 @@ import pandas as pd
 from . import db as db_module
 from . import pipeline
 from .config import DEFAULT_DB_PATH, DEFAULT_TICKERS_FILE, DEFAULT_WINDOW, load_tickers
+from .sources import ALPHAVANTAGE_KEY_ENV, DEFAULT_SOURCE, SOURCE_NOTES, SOURCES
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -21,6 +23,15 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         "--tickers-file",
         default=str(DEFAULT_TICKERS_FILE),
         help="Ticker list used when none are given (default: %(default)s).",
+    )
+
+
+def _add_source(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--source",
+        choices=sorted(SOURCES),
+        default=DEFAULT_SOURCE,
+        help="Data provider (default: %(default)s, overridable with $PRICEVOL_SOURCE).",
     )
 
 
@@ -39,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("--start", help="First date to request (YYYY-MM-DD). Default: resume from stored data.")
     p_ingest.add_argument("--end", help="Last date to request (YYYY-MM-DD, exclusive in yfinance).")
     p_ingest.add_argument("--full", action="store_true", help="Re-download full history instead of resuming.")
+    _add_source(p_ingest)
 
     p_vol = sub.add_parser("vol", help="Compute realized volatility from stored prices.")
     _add_common(p_vol)
@@ -52,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--start", help="First date to request (YYYY-MM-DD).")
     p_run.add_argument("--end", help="Last date to request (YYYY-MM-DD).")
     p_run.add_argument("--full", action="store_true", help="Re-download full history instead of resuming.")
+    _add_source(p_run)
     p_run.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="Trading days (default: %(default)s).")
     p_run.add_argument("--tail", type=int, default=5, help="Rows to show per ticker (default: %(default)s).")
     p_run.add_argument("--csv", help="Also write the full result to this CSV path.")
@@ -59,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_latest = sub.add_parser("latest", help="Show the most recent stored volatility per ticker.")
     _add_common(p_latest)
     p_latest.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="Trading days (default: %(default)s).")
+
+    sub.add_parser("sources", help="List the available data providers.")
 
     p_status = sub.add_parser("status", help="Show what the database holds.")
     p_status.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite file (default: %(default)s).")
@@ -113,13 +128,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Initialized {args.db}")
         return 0
 
+    if args.command == "sources":
+        print("Data providers (pick one with --source or $PRICEVOL_SOURCE):")
+        for name in sorted(SOURCES):
+            marker = "*" if name == DEFAULT_SOURCE else " "
+            note = SOURCE_NOTES.get(name, "")
+            ready = ""
+            if name == "alphavantage":
+                ready = " [key set]" if os.environ.get(ALPHAVANTAGE_KEY_ENV) else " [no key]"
+            print(f" {marker} {name:<14} {note}{ready}")
+        print("\n * = current default")
+        return 0
+
     if args.command == "status":
         conn = db_module.connect(args.db)
         try:
             db_module.init_db(conn)
             rows = conn.execute(
                 """
-                SELECT ticker, COUNT(*) AS n, MIN(date) AS first, MAX(date) AS last
+                SELECT ticker, COUNT(*) AS n, MIN(date) AS first, MAX(date) AS last,
+                       COALESCE(GROUP_CONCAT(DISTINCT source), '?') AS sources
                 FROM prices GROUP BY ticker ORDER BY ticker
                 """
             ).fetchall()
@@ -130,15 +158,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         print(f"{args.db}:")
         for row in rows:
-            print(f"  {row['ticker']:<8} {row['n']:>6} bars  {row['first']} → {row['last']}")
+            print(
+                f"  {row['ticker']:<8} {row['n']:>6} bars  "
+                f"{row['first']} → {row['last']}  via {row['sources']}"
+            )
         return 0
 
     tickers = _resolve_tickers(args)
 
     if args.command in ("ingest", "run"):
-        print(f"Ingesting {len(tickers)} ticker(s) into {args.db}")
+        print(f"Ingesting {len(tickers)} ticker(s) from {args.source} into {args.db}")
         results = pipeline.ingest(
-            tickers, db_path=args.db, start=args.start, end=args.end, full_refresh=args.full
+            tickers,
+            db_path=args.db,
+            start=args.start,
+            end=args.end,
+            full_refresh=args.full,
+            source=args.source,
         )
         failures = _print_ingest(results)
         if args.command == "ingest":

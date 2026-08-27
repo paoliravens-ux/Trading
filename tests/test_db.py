@@ -80,3 +80,41 @@ def test_latest_date_is_none_for_unknown_ticker(tmp_path):
     db_module.init_db(conn)
     assert db_module.latest_date(conn, "NOPE") is None
     conn.close()
+
+
+def test_source_column_is_recorded(tmp_path, price_frame):
+    conn = db_module.connect(tmp_path / "p.sqlite")
+    db_module.init_db(conn)
+    db_module.upsert_prices(conn, "AAPL", price_frame(seed=1, n=5), source="stooq")
+    stored = db_module.read_prices(conn, ["AAPL"])
+    assert set(stored["source"]) == {"stooq"}
+
+    # A later run without a source must not blank out the recorded provenance.
+    db_module.upsert_prices(conn, "AAPL", price_frame(seed=1, n=5))
+    assert set(db_module.read_prices(conn, ["AAPL"])["source"]) == {"stooq"}
+    conn.close()
+
+
+def test_migrates_a_v1_database(tmp_path):
+    path = tmp_path / "old.sqlite"
+    conn = db_module.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE prices (
+            ticker TEXT NOT NULL, date TEXT NOT NULL,
+            open REAL, high REAL, low REAL, close REAL, adj_close REAL, volume INTEGER,
+            PRIMARY KEY (ticker, date)
+        );
+        INSERT INTO prices VALUES ('AAPL', '2024-01-02', 1, 2, 0.5, 1.5, 1.5, 100);
+        """
+    )
+    conn.commit()
+
+    db_module.init_db(conn)  # v1 -> v2
+
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(prices)")}
+    assert "source" in columns
+    stored = db_module.read_prices(conn, ["AAPL"])
+    assert len(stored) == 1 and pd.isna(stored["source"].iloc[0])
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db_module.SCHEMA_VERSION
+    conn.close()

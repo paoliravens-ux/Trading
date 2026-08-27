@@ -8,7 +8,7 @@ from typing import Iterable, Optional, Sequence
 
 import pandas as pd
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 PRICE_COLUMNS = ["open", "high", "low", "close", "adj_close", "volume"]
 
@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS prices (
     close     REAL,
     adj_close REAL,
     volume    INTEGER,
+    source    TEXT,                  -- provider the bar came from
     PRIMARY KEY (ticker, date)
 );
 
@@ -52,24 +53,37 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create the schema. Safe to call on every run."""
+    """Create the schema and apply migrations. Safe to call on every run."""
     with conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
-def _price_rows(ticker: str, frame: pd.DataFrame) -> list[tuple]:
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an older database up to the current schema."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(prices)")}
+    if "source" not in columns:  # v1 -> v2
+        conn.execute("ALTER TABLE prices ADD COLUMN source TEXT")
+
+
+def _price_rows(ticker: str, frame: pd.DataFrame, source: Optional[str]) -> list[tuple]:
     rows = []
     for date, row in frame.iterrows():
         values = [row.get(col) for col in PRICE_COLUMNS]
         values = [None if pd.isna(v) else v for v in values]
         volume = values[-1]
         values[-1] = None if volume is None else int(volume)
-        rows.append((ticker, pd.Timestamp(date).strftime("%Y-%m-%d"), *values))
+        rows.append((ticker, pd.Timestamp(date).strftime("%Y-%m-%d"), *values, source))
     return rows
 
 
-def upsert_prices(conn: sqlite3.Connection, ticker: str, frame: pd.DataFrame) -> int:
+def upsert_prices(
+    conn: sqlite3.Connection,
+    ticker: str,
+    frame: pd.DataFrame,
+    source: Optional[str] = None,
+) -> int:
     """Insert or replace daily bars for one ticker. Returns rows written.
 
     ``frame`` is indexed by date and holds the columns in ``PRICE_COLUMNS``;
@@ -78,19 +92,20 @@ def upsert_prices(conn: sqlite3.Connection, ticker: str, frame: pd.DataFrame) ->
     """
     if frame is None or frame.empty:
         return 0
-    rows = _price_rows(ticker, frame)
+    rows = _price_rows(ticker, frame, source)
     with conn:
         conn.executemany(
             """
-            INSERT INTO prices (ticker, date, open, high, low, close, adj_close, volume)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO prices (ticker, date, open, high, low, close, adj_close, volume, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticker, date) DO UPDATE SET
                 open      = excluded.open,
                 high      = excluded.high,
                 low       = excluded.low,
                 close     = excluded.close,
                 adj_close = excluded.adj_close,
-                volume    = excluded.volume
+                volume    = excluded.volume,
+                source    = COALESCE(excluded.source, prices.source)
             """,
             rows,
         )
@@ -147,7 +162,7 @@ def read_prices(
         params.append(end)
 
     sql = (
-        "SELECT ticker, date, open, high, low, close, adj_close, volume FROM prices"
+        "SELECT ticker, date, open, high, low, close, adj_close, volume, source FROM prices"
         + _where(clauses)
         + " ORDER BY ticker, date"
     )

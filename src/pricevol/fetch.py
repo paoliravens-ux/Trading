@@ -1,4 +1,4 @@
-"""Download daily bars from Yahoo Finance via yfinance."""
+"""Fetch daily bars from a provider and normalize them for storage."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ _RENAMES = {
     "close": "close",
     "adj close": "adj_close",
     "adjclose": "adj_close",
+    "adjusted close": "adj_close",
     "volume": "volume",
 }
 
@@ -32,7 +33,7 @@ def _flatten_columns(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
 
 
 def normalize_frame(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    """Turn a yfinance frame into the column layout used by the prices table."""
+    """Turn a provider's frame into the column layout used by the prices table."""
     empty = pd.DataFrame(columns=PRICE_COLUMNS, index=pd.DatetimeIndex([], name="date"))
     if raw is None or raw.empty:
         return empty
@@ -60,33 +61,29 @@ def fetch_prices(
     ticker: str,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    source: Optional[str] = None,
     retries: int = 3,
     pause: float = 1.0,
 ) -> pd.DataFrame:
-    """Fetch daily bars for one ticker, indexed by date.
+    """Fetch daily bars for one ticker from ``source``, indexed by date.
 
-    Retries transient network failures with a linear backoff; an empty result
-    (delisted symbol, weekend-only range) comes back as an empty DataFrame
-    rather than an error.
+    Retries transient failures with a linear backoff; an empty result (unknown
+    symbol, weekend-only range) comes back as an empty DataFrame rather than an
+    error. See :mod:`pricevol.sources` for the available providers.
     """
-    import yfinance as yf  # imported lazily so the rest of the package works offline
+    from .sources import DEFAULT_SOURCE, get_source
+
+    provider = get_source(source or DEFAULT_SOURCE)
 
     last_error: Optional[Exception] = None
     for attempt in range(1, max(1, retries) + 1):
         try:
-            raw = yf.download(
-                ticker,
-                start=start,
-                end=end,
-                interval="1d",
-                auto_adjust=False,
-                actions=False,
-                progress=False,
-                threads=False,
-            )
-            return normalize_frame(raw, ticker)
+            return provider(ticker, start=start, end=end)
         except Exception as exc:  # noqa: BLE001 - network/parse errors are all retryable
             last_error = exc
             if attempt < retries:
                 time.sleep(pause * attempt)
-    raise RuntimeError(f"Failed to download {ticker} after {retries} attempts: {last_error}")
+    raise RuntimeError(
+        f"Failed to download {ticker} from {source or DEFAULT_SOURCE} "
+        f"after {retries} attempts: {last_error}"
+    )
