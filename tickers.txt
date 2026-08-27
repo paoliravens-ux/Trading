@@ -1,0 +1,5 @@
+# One ticker per line. Edit this list, or pass symbols on the command line:
+#   pricevol run AAPL MSFT
+AAPL
+MSFT
+SPY
